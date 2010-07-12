@@ -19,8 +19,15 @@
 package org.apache.avro.mojo;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintStream;
 
+import org.apache.avro.Protocol;
+import org.apache.avro.genavro.GenAvro;
+import org.apache.avro.genavro.ParseException;
 import org.apache.avro.specific.SpecificCompiler;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -35,15 +42,19 @@ import org.apache.maven.shared.model.fileset.util.FileSetManager;
  * @phase generate-sources
  */
 public class ProtocolMojo extends AbstractMojo {
+
+    public static final String IDL_EXTENSION = ".genavro";
+    public static final String PROTOCOL_EXTENSION = ".avpr";
+
     /**
      * @parameter expression="${sourceDirectory}" default-value="${basedir}/src/main/avro"
      */
-    private File sourceDirectory;
+    protected File sourceDirectory;
 
     /**
      * @parameter expression="${outputDirectory}" default-value="${project.build.directory}/generated-sources/avro"
      */
-    private File outputDirectory;
+    protected File outputDirectory;
 
     /**
      * A set of Ant-like inclusion patterns used to select files from
@@ -52,7 +63,8 @@ public class ProtocolMojo extends AbstractMojo {
      *
      * @parameter
      */
-    private String[] includes = new String[] { "**/*.avpr" };
+    private final String[] includes = new String[] { "**/*" + PROTOCOL_EXTENSION,
+                                                     "**/*" + IDL_EXTENSION };
 
     /**
      * A set of Ant-like exclusion patterns used to prevent certain
@@ -61,7 +73,7 @@ public class ProtocolMojo extends AbstractMojo {
      *
      * @parameter
      */
-    private String[] excludes = new String[0];
+    private final String[] excludes = new String[0];
 
     /**
      * The current Maven project.
@@ -70,22 +82,22 @@ public class ProtocolMojo extends AbstractMojo {
      * @readonly
      * @required
      */
-    private MavenProject project;
+    protected MavenProject project;
 
-    private FileSetManager fileSetManager = new FileSetManager();
+    private final FileSetManager fileSetManager = new FileSetManager();
 
     public void execute() throws MojoExecutionException {
         if (!sourceDirectory.isDirectory()) {
-          // Some prefer to throw an exception if there's not avro directory, but
-          // I think it's fine not to have a directory since in a multi-module project
-          // some subprojects would have a src/main/avro and some won't
-          return;
-          // not:   throw new MojoExecutionException(sourceDirectory + " is not a directory");
+            // Some prefer to throw an exception if there's not avro directory, but
+            // I think it's fine not to have a directory since in a multi-module project
+            // some subprojects would have a src/main/avro and some won't
+            return;
+            // not: throw new MojoExecutionException(sourceDirectory + " is not a directory");
         }
 
         FileSet fs = new FileSet();
         fs.setDirectory(sourceDirectory.getAbsolutePath());
-        fs.setFollowSymlinks( false );
+        fs.setFollowSymlinks(false);
 
         for (String include : includes) {
             fs.addInclude(include);
@@ -96,17 +108,71 @@ public class ProtocolMojo extends AbstractMojo {
 
         String[] includedFiles = fileSetManager.getIncludedFiles(fs);
 
+        // Make dir for genavro tmp files
+        String tmpOutDir = System.getProperty("java.io.tmpdir") + "avro";
+        new File(tmpOutDir).mkdirs();
+
         for (String filename : includedFiles) {
             try {
-                SpecificCompiler.compileProtocol(
-                        new File(sourceDirectory, filename),
-                        outputDirectory);
+                // Step 1: genavro
+                String in = sourceDirectory.getAbsolutePath() + File.separator + filename;
+                if (in.endsWith(IDL_EXTENSION)) {
+                    String out = tmpOutDir + File.separator + getNameWithoutExtension(filename) +
+                            PROTOCOL_EXTENSION;
+                    InputStream parseIn = new FileInputStream(in);
+                    PrintStream parseOut = new PrintStream(new FileOutputStream(out));
+                    GenAvro parser = new GenAvro(parseIn);
+                    Protocol p = parser.CompilationUnit();
+                    parseOut.print(p.toString(true));
+                    in = out;
+                }
+                // Step 2: SpecificCompiler
+                SpecificCompiler.compileProtocol(new File(in), outputDirectory);
             } catch (IOException e) {
-                throw new MojoExecutionException("Error compiling protocol file "
-                        + filename + " to " + outputDirectory, e);
+                throw new MojoExecutionException("Error compiling protocol file " + filename
+                        + " to " + outputDirectory, e);
+            } catch (ParseException e) {
+                throw new MojoExecutionException("Error parsing genavro file " + filename + " to "
+                        + outputDirectory, e);
             }
         }
 
         project.addCompileSourceRoot(outputDirectory.getAbsolutePath());
+
+        // cleanup
+        deleteDir(tmpOutDir);
     }
+
+    /**
+     * Gets a file name from the string without the file extension.
+     * For example: x.genavro => x.
+     */
+    private String getNameWithoutExtension(String filename) {
+      if (filename == null) {
+        return null;
+      }
+      int dot = filename.lastIndexOf('.');
+      return filename.substring(0, dot);
+    }
+
+    /**
+     * Deletes all files and subdirectories under dir. If a deletion fails, the method stops
+     * attempting to delete and returns false.
+     **/
+    public static boolean deleteDir(String path) {
+        File dir = new File(path);
+        if (dir.exists() && dir.isDirectory()) {
+            String[] children = dir.list();
+            for (int i = 0; i < children.length; i++) {
+                boolean success = deleteDir(new File(dir, children[i]).getAbsolutePath());
+                if (!success) {
+                    return false;
+                }
+            }
+        }
+
+        // The directory is now empty so delete it
+        return dir.delete();
+    }
+
 }
